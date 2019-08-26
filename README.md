@@ -36,43 +36,9 @@ cloud.At present, it only supports modbus rtu driver and aliyun.
 
 (6) transmit paras to thread is the key.
 
-# 06041011:
-(1) the project compile has no warning.
+# 08261453:
+(1) Add the aliyun iot c-sdk into project,and test ok.
+(2) use the USR-LTE-7S4 4G gprs dtu.
+(3) this is not a gateway,but a  single device connect to the ali iot.
 
-# 06041409:
-(1) modify the struct, not use point(*), but use arrary,malloc size.
-    then can tx para to thread ok.
 
-# 07162238:
-(1) add the driver folder,and mb_rtu driver thread, test well.
-(2) remote the sqlite for the test success.
-
-# 07201551:
-(1) we add the libmodbus into proj,and the libmodbus test ok.
-
-# 07201921:
-(1) modify the thread para transfer mode: transfer level 1 pointer to the driver thread,
-    but the pointer consist by on struct,and the struct const by level 2 pointer.
-    so,we can use one driver thread,scanning many slave device,and many section data.
-
-# 07202211:
-(1) modify the thread para transfer mode: transfer level 1 pointer,this is more simple
-	than level2 pointer. we need to know, the level 1 pointer can include lot of
-	data, becase,pointer is addr,the addr can be start addr. start addr! start addr!
-	behind the pointer, the more data the more you want. 
-
-# 07211638:
-(1) for our thread can both read and write,we use the event fsm,and now,the program can running ok.
-
-# 07212152:
-(1) modify the thread para transfer mode, we define a type,include void * pointer, this mode is 
-	good for driver extension,now the test can running ok.
-
-# 07222227:
-(1) add the modbus write regs func, and the function is running ok.
-(2) we use the gettimeofday() get the tick of OS for count the delay time,function is ok,but the
-    write func may miss sometimes. function ok.
-
-# 07232306:
-(1) we modify the program design,use general mb_rtu driver thread, test ok,must have bug.
-(2) modify the driver thread para type.

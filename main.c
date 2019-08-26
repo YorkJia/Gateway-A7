@@ -18,6 +18,7 @@ int HAL_SetDeviceSecret(char *device_secret);
 
 
 
+int32_t  HAL_DTU_Uart_Send(const void *data, uint32_t size);
 
 
 #define EXAMPLE_TRACE(...)                                          \
@@ -278,9 +279,9 @@ int main(int argc, char **argv)
     HAL_SetProductKey(str);
     str = "ax8IGFMYA7DJ60jx";
     HAL_SetProductSecret(str);
-    str = "20190810001";
+    str = "863920030730092";
     HAL_SetDeviceName(str);
-    str = "E3xsTdC6HaxkQ2LfSnzQH3y0Z53x83pg";
+    str = "fT97IDFKjJqAccOT3h4GzFlPmXTvklRF";
     HAL_SetDeviceSecret(str);
 
     HAL_GetProductKey(PRODUCT_KEY);
@@ -325,6 +326,7 @@ int main(int argc, char **argv)
         return -1;
     }
 
+	
     /* Start Connect Aliyun Server */
     res = IOT_Linkkit_Connect(g_user_example_ctx.master_devid);
     if (res < 0) {
@@ -332,16 +334,20 @@ int main(int argc, char **argv)
         return -1;
     }
 
+	
+
     while (1) {
+
+
         IOT_Linkkit_Yield(EXAMPLE_YIELD_TIMEOUT_MS);
 
         /* Post Proprety Example */
-        if ((cnt % 2) == 0) {
+        if ((cnt % 10) == 0) {
             user_post_property();
         }
 
         /* Post Event Example */
-        if ((cnt % 10) == 0) {
+        if ((cnt % 30) == 0) {
             user_post_event();
         }
 

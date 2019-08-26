@@ -29,6 +29,7 @@
 #include <netinet/tcp.h>
 #include <fcntl.h>
 #include <string.h>
+#include <termios.h>
 
 #include <infra_config.h>
 #include "infra_types.h"
@@ -40,6 +41,325 @@ char _product_key[IOTX_PRODUCT_KEY_LEN + 1]       = "a1RIsMLz2BJ";
 char _product_secret[IOTX_PRODUCT_SECRET_LEN + 1] = "fSAF0hle6xL0oRWd";
 char _device_name[IOTX_DEVICE_NAME_LEN + 1]       = "example1";
 char _device_secret[IOTX_DEVICE_SECRET_LEN + 1]   = "RDXf67itLqZCwdMCRrw0N5FHbv5D7jrE";
+
+/******************************************************/
+/* uart config */
+#define AT_UART_PORT 1
+#define AT_UART_LINUX_DEV    "/dev/ttymxc1"
+#define AT_UART_BAUDRATE     115200
+#define AT_UART_DATA_WIDTH   DATA_WIDTH_8BIT
+#define AT_UART_PARITY       NO_PARITY
+#define AT_UART_STOP_BITS    STOP_BITS_1
+#define AT_UART_FLOW_CONTROL FLOW_CONTROL_DISABLED
+#define AT_UART_MODE         MODE_TX_RX
+#define AT_UART_TIMEOUT_MS   1000
+
+
+
+/*
+ * UART data width
+ */
+typedef enum {
+    DATA_WIDTH_5BIT,
+    DATA_WIDTH_6BIT,
+    DATA_WIDTH_7BIT,
+    DATA_WIDTH_8BIT,
+    DATA_WIDTH_9BIT
+} hal_uart_data_width_t;
+
+/*
+ * UART stop bits
+ */
+typedef enum {
+    STOP_BITS_1,
+    STOP_BITS_2
+} hal_uart_stop_bits_t;
+
+/*
+ * UART flow control
+ */
+typedef enum {
+    FLOW_CONTROL_DISABLED,
+    FLOW_CONTROL_CTS,
+    FLOW_CONTROL_RTS,
+    FLOW_CONTROL_CTS_RTS
+} hal_uart_flow_control_t;
+
+/*
+ * UART parity
+ */
+typedef enum {
+    NO_PARITY,
+    ODD_PARITY,
+    EVEN_PARITY
+} hal_uart_parity_t;
+
+/*
+ * UART mode
+ */
+typedef enum {
+    MODE_TX,
+    MODE_RX,
+    MODE_TX_RX
+} hal_uart_mode_t;
+
+/*
+ * UART configuration
+ */
+typedef struct {
+    uint32_t                baud_rate;
+    hal_uart_data_width_t   data_width;
+    hal_uart_parity_t       parity;
+    hal_uart_stop_bits_t    stop_bits;
+    hal_uart_flow_control_t flow_control;
+    hal_uart_mode_t         mode;
+} uart_config_t;
+
+typedef struct {
+    uint8_t       port;   /* uart port */
+    uart_config_t config; /* uart config */
+    void         *priv;   /* priv data */
+} uart_dev_t;
+
+
+
+
+
+static uart_dev_t at_uart;
+static int at_uart_fd = -1;
+
+
+
+
+static int read_and_discard_all_data(const int fd)
+{
+    int was_msg_already_printed = 0;
+    int errno_code;
+
+    while (1) {
+        char buffer[1024];
+        const ssize_t read_count = read(fd, buffer, sizeof(buffer));
+
+        if (read_count == 0) {
+            /* "EOF" or "connection closed at the other end"*/
+            return 0;
+        }
+
+        if (read_count > 0) {
+            if (!was_msg_already_printed) {
+                printf("Some stale data was discarded.\r\n");
+                was_msg_already_printed = 1;
+            }
+
+            continue;
+        }
+
+        assert(read_count == -1);  /* According to the specification. */
+
+        errno_code = errno;
+
+        if (errno_code == EINTR) {
+            continue;
+        }
+
+        if (errno_code == EAGAIN ||
+            errno_code == EWOULDBLOCK) {
+            /**
+             * We know that the file descriptor has been opened with
+             * O_NONBLOCK or O_NDELAY, and these codes mean that there
+             * is no data to read at present.
+             */
+            return 0;
+        }
+
+        /* Some other error has occurred. */
+        return -1;
+    }
+}
+
+static int32_t HAL_AT_Uart_Init(uart_dev_t *uart)
+{
+    int fd;
+    struct termios t_opt;
+    speed_t baud;
+
+    if (uart->port != AT_UART_PORT) {
+        return 0;
+    }
+
+    if ((at_uart_fd = open(AT_UART_LINUX_DEV,
+                           O_RDWR | O_NOCTTY | O_NDELAY)) == -1) {
+        printf("open at uart failed\r\n");
+        return -1;
+    }
+
+    switch (uart->config.baud_rate) {
+        case 115200:
+            baud = B115200;
+            break;
+        case 921600:
+            baud = B921600;
+            break;
+        default:
+            baud = B115200;
+            break;
+    }
+
+    fd = at_uart_fd;
+    /* set the serial port parameters */
+    fcntl(fd, F_SETFL, 0);
+    if (0 != tcgetattr(fd, &t_opt)) {
+        return -1;
+    }
+
+    if (0 != cfsetispeed(&t_opt, baud)) {
+        return -1;
+    }
+
+    if (0 != cfsetospeed(&t_opt, baud)) {
+        return -1;
+    }
+
+    /* 8N1, flow control, etc. */
+    t_opt.c_cflag |= (CLOCAL | CREAD);
+    if (uart->config.parity == NO_PARITY) {
+        t_opt.c_cflag &= ~PARENB;
+    }
+    if (uart->config.stop_bits == STOP_BITS_1) {
+        t_opt.c_cflag &= ~CSTOPB;
+    } else {
+        t_opt.c_cflag |= CSTOPB;
+    }
+    t_opt.c_cflag &= ~CSIZE;
+    switch (uart->config.data_width) {
+        case DATA_WIDTH_5BIT:
+            t_opt.c_cflag |= CS5;
+            break;
+        case DATA_WIDTH_6BIT:
+            t_opt.c_cflag |= CS6;
+            break;
+        case DATA_WIDTH_7BIT:
+            t_opt.c_cflag |= CS7;
+            break;
+        case DATA_WIDTH_8BIT:
+            t_opt.c_cflag |= CS8;
+            break;
+        default:
+            t_opt.c_cflag |= CS8;
+            break;
+    }
+    t_opt.c_lflag &= ~(ECHO | ECHOE | ISIG | ICANON);
+
+    /**
+     * AT is going to use a binary protocol, so make sure to
+     * turn off any CR/LF translation and the like.
+     */
+    t_opt.c_iflag &= ~(IXON | IXOFF | IXANY | INLCR | ICRNL);
+
+    t_opt.c_oflag &= ~OPOST;
+    t_opt.c_cc[VMIN] = 0;
+    t_opt.c_cc[VTIME] = 5;
+
+    if (0 != tcsetattr(fd, TCSANOW, &t_opt)) {
+        return -1;
+    }
+
+    printf("open at uart succeed\r\n");
+
+    /* clear uart buffer */
+    read_and_discard_all_data(fd);
+
+    return 0;
+}
+
+static int32_t HAL_AT_Uart_Deinit(uart_dev_t *uart)
+{
+    if (uart->port == AT_UART_PORT) {
+        close(at_uart_fd);
+    }
+    return 0;
+}
+
+static int32_t HAL_AT_Uart_Send(uart_dev_t *uart, const void *data,
+                         uint32_t size, uint32_t timeout)
+{
+    uint32_t ret, rmd = size;
+
+    if (uart->port == AT_UART_PORT) {
+        while (rmd > 0) {
+            ret = write(at_uart_fd, data + size - rmd, rmd);
+            if (ret == -1) {
+                printf("write uart fd failed on error: %d.\r\n", errno);
+                return -1;
+            }
+            rmd -= ret;
+        }
+    } else {
+        if (write(1, data, size) < 0) {
+            printf("write failed\n");
+        }
+    }
+
+    return 0;
+}
+
+static int32_t HAL_AT_Uart_Recv(uart_dev_t *uart, void *data, uint32_t expect_size,
+                         uint32_t *recv_size, uint32_t timeout)
+{
+    int fd, n;
+
+    if (uart->port == AT_UART_PORT) {
+        fd = at_uart_fd;
+    } else {
+        fd = 1;
+    }
+
+    if ((n = read(fd, data, expect_size)) == -1) {
+        return -1;
+    }
+
+    if (uart->port != AT_UART_PORT && *(char *)data == '\n') {
+        *(char *)data = '\r';
+    }
+    if (recv_size) {
+        *recv_size = n;
+    }
+
+    return 0;
+}
+
+static void at_uart_configure(uart_dev_t *u)
+{
+    u->port                = AT_UART_PORT;
+    u->config.baud_rate    = AT_UART_BAUDRATE;
+    u->config.data_width   = AT_UART_DATA_WIDTH;
+    u->config.parity       = AT_UART_PARITY;
+    u->config.stop_bits    = AT_UART_STOP_BITS;
+    u->config.flow_control = AT_UART_FLOW_CONTROL;
+    u->config.mode         = AT_UART_MODE;
+}
+
+static int at_init_uart()
+{
+    at_uart_configure(&at_uart);
+
+    if (HAL_AT_Uart_Init(&at_uart) != 0) {
+        return -1;
+    }
+
+    //at._pstuart = &at_uart;
+
+    return 0;
+}
+/******************************************************/
+
+
+
+
+
+
+
+
 
 /**
  * @brief Deallocate memory block
@@ -53,7 +373,6 @@ void HAL_Free(void *ptr)
 {
     free(ptr);
 }
-
 
 
 int HAL_SetProductKey(char *product_key)
@@ -70,7 +389,6 @@ int HAL_SetProductKey(char *product_key)
 }
 
 
-
 int HAL_SetProductSecret(char *product_secret)
 {
     int len = strlen(product_secret);
@@ -83,7 +401,6 @@ int HAL_SetProductSecret(char *product_secret)
 
     return len;
 }
-
 
 
 int HAL_SetDeviceName(char *device_name)
@@ -131,7 +448,6 @@ int HAL_GetDeviceName(char device_name[IOTX_DEVICE_NAME_LEN + 1])
 	return strlen(device_name);
 }
 
-
 /**
  * @brief Get device secret from user's system persistent storage
  *
@@ -147,7 +463,6 @@ int HAL_GetDeviceSecret(char device_secret[IOTX_DEVICE_SECRET_LEN + 1])
 
     return len;
 }
-
 
 /**
  * @brief Get firmware version
@@ -233,7 +548,6 @@ void *HAL_MutexCreate(void)
     return mutex;
 }
 
-
 /**
  * @brief Destroy the specified mutex object, it will release related resource.
  *
@@ -244,7 +558,7 @@ void *HAL_MutexCreate(void)
  */
 void HAL_MutexDestroy(void *mutex)
 {
-	int err_num;
+    int err_num;
 
     if (!mutex) {
         printf("mutex want to destroy is NULL!\n");
@@ -274,7 +588,6 @@ void HAL_MutexLock(void *mutex)
     }
 }
 
-
 /**
  * @brief Releases ownership of the specified mutex object..
  *
@@ -290,8 +603,6 @@ void HAL_MutexUnlock(void *mutex)
         printf("unlock mutex failed - '%s' (%d)\n", strerror(err_num), err_num);
     }
 }
-
-
 /**
  * @brief Writes formatted data to stream.
  *
@@ -389,24 +700,15 @@ void HAL_Srandom(uint32_t seed)
  * @retval < 0 : Fail.
  * @retval   0 : Success.
  */
-int HAL_TCP_Destroy(uintptr_t fd)
+    int HAL_TCP_Destroy(uintptr_t fd)
 {
-	 int rc;
-
-    /* Shutdown both send and receive operations. */
-    rc = shutdown((int) fd, 2);
-    if (0 != rc) {
-        printf("shutdown error\n");
-        return -1;
-    }
-
-    rc = close((int) fd);
-    if (0 != rc) {
-        printf("closesocket error\n");
-        return -1;
-    }
-
-    return 0;
+	if(HAL_AT_Uart_Deinit(&at_uart) == 0){
+		printf("close uart success.\n");
+		return 0;
+	}{
+		printf("close usart error.\n");
+		return -1;
+	}
 }
 
 
@@ -420,88 +722,16 @@ int HAL_TCP_Destroy(uintptr_t fd)
    @retval   0 : Fail.
    @retval > 0 : Success, the value is handle of this TCP connection.
  */
-uintptr_t HAL_TCP_Establish(const char *host, uint16_t port)
+    uintptr_t HAL_TCP_Establish(const char *host, uint16_t port)
 {
-	 struct addrinfo hints;
-    struct addrinfo *addrInfoList = NULL;
-    struct addrinfo *cur = NULL;
-    int fd = 0;
-    int rc = 0;
-    char service[6];
-
-    memset(&hints, 0, sizeof(hints));
-
-    printf("establish tcp connection with server(host='%s', port=[%u])\n", host, port);
-
-    hints.ai_family = AF_INET; /* only IPv4 */
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    sprintf(service, "%u", port);
-
-    if ((rc = getaddrinfo(host, service, &hints, &addrInfoList)) != 0) {
-        printf("getaddrinfo error(%d), host = '%s', port = [%d]\n", rc, host, port);
-        return (uintptr_t)(-1);
-    }
-
-    for (cur = addrInfoList; cur != NULL; cur = cur->ai_next) {
-        if (cur->ai_family != AF_INET) {
-            printf("socket type error\n");
-            rc = -1;
-            continue;
-        }
-
-        fd = socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol);
-        if (fd < 0) {
-            printf("create socket error\n");
-            rc = -1;
-            continue;
-        }
-
-        if (connect(fd, cur->ai_addr, cur->ai_addrlen) == 0) {
-            rc = fd;
-            break;
-        }
-
-        close(fd);
-        printf("connect error\n");
-        rc = -1;
-    }
-
-    if (-1 == rc) {
-        printf("fail to establish tcp\n");
-    } else {
-        printf("success to establish tcp, fd=%d\n", rc);
-    }
-    freeaddrinfo(addrInfoList);
-
-    return (uintptr_t)rc;
+	if(at_init_uart() == 0){
+		printf("open uart ok:%d\n", at_uart_fd);
+		return (uintptr_t)at_uart_fd;
+	}else{
+		printf("open uart error.\n");
+		return 0;
+	}
 }
-
-static uint64_t _linux_get_time_ms(void)
-{
-    struct timeval tv = { 0 };
-    uint64_t time_ms;
-
-    gettimeofday(&tv, NULL);
-
-    time_ms = tv.tv_sec * 1000 + tv.tv_usec / 1000;
-
-    return time_ms;
-}
-
-static uint64_t _linux_time_left(uint64_t t_end, uint64_t t_now)
-{
-    uint64_t t_left;
-
-    if (t_end > t_now) {
-        t_left = t_end - t_now;
-    } else {
-        t_left = 0;
-    }
-
-    return t_left;
-}
-
 
 
 /**
@@ -520,66 +750,15 @@ static uint64_t _linux_time_left(uint64_t t_end, uint64_t t_now)
 
  * @see None.
  */
-    int32_t HAL_TCP_Read(uintptr_t fd, char *buf, uint32_t len, uint32_t timeout_ms)
+int32_t HAL_TCP_Read(uintptr_t fd, char *buf, uint32_t len, uint32_t timeout_ms)
 {
-	 int ret, err_code, tcp_fd;
-    uint32_t len_recv;
-    uint64_t t_end, t_left;
-    fd_set sets;
-    struct timeval timeout;
-
-    t_end = _linux_get_time_ms() + timeout_ms;
-    len_recv = 0;
-    err_code = 0;
-
-    if (fd >= FD_SETSIZE) {
-        return -1;
-    }
-    tcp_fd = (int)fd;
-
-    do {
-        t_left = _linux_time_left(t_end, _linux_get_time_ms());
-        if (0 == t_left) {
-            break;
-        }
-        FD_ZERO(&sets);
-        FD_SET(tcp_fd, &sets);
-
-        timeout.tv_sec = t_left / 1000;
-        timeout.tv_usec = (t_left % 1000) * 1000;
-
-        ret = select(tcp_fd + 1, &sets, NULL, NULL, &timeout);
-        if (ret > 0) {
-            ret = recv(tcp_fd, buf + len_recv, len - len_recv, 0);
-            if (ret > 0) {
-                len_recv += ret;
-            } else if (0 == ret) {
-                printf("connection is closed\n");
-                err_code = -1;
-                break;
-            } else {
-                if (EINTR == errno) {
-                    continue;
-                }
-                printf("recv fail\n");
-                err_code = -2;
-                break;
-            }
-        } else if (0 == ret) {
-            break;
-        } else {
-            if (EINTR == errno) {
-                continue;
-            }
-            printf("select-recv fail\n");
-            err_code = -2;
-            break;
-        }
-    } while ((len_recv < len));
-
-    /* priority to return data bytes if any data be received from TCP connection. */
-    /* It will get error code on next calling */
-    return (0 != len_recv) ? len_recv : err_code;
+	uint32_t recv_size;	
+	if(HAL_AT_Uart_Recv(&at_uart, buf, len, &recv_size, timeout_ms) == 0){
+		return recv_size;
+	}else{
+		printf("tcp read error.\n");
+		return -2;
+	}
 }
 
 
@@ -598,83 +777,14 @@ static uint64_t _linux_time_left(uint64_t t_end, uint64_t t_now)
 
  * @see None.
  */
-
-int32_t HAL_TCP_Write(uintptr_t fd, const char *buf, uint32_t len, uint32_t timeout_ms)
+    int32_t HAL_TCP_Write(uintptr_t fd, const char *buf, uint32_t len, uint32_t timeout_ms)
 {
-    int ret,tcp_fd;
-    uint32_t len_sent;
-    uint64_t t_end, t_left;
-    fd_set sets;
-    int net_err = 0;
-
-    t_end = _linux_get_time_ms() + timeout_ms;
-    len_sent = 0;
-    ret = 1; /* send one time if timeout_ms is value 0 */
-
-    if (fd >= FD_SETSIZE) {
-        return -1;
-    }
-    tcp_fd = (int)fd;
-
-    do {
-        t_left = _linux_time_left(t_end, _linux_get_time_ms());
-
-        if (0 != t_left) {
-            struct timeval timeout;
-
-            FD_ZERO(&sets);
-            FD_SET(tcp_fd, &sets);
-
-            timeout.tv_sec = t_left / 1000;
-            timeout.tv_usec = (t_left % 1000) * 1000;
-
-            ret = select(tcp_fd + 1, NULL, &sets, NULL, &timeout);
-            if (ret > 0) {
-                if (0 == FD_ISSET(tcp_fd, &sets)) {
-                    printf("Should NOT arrive\n");
-                    /* If timeout in next loop, it will not sent any data */
-                    ret = 0;
-                    continue;
-                }
-            } else if (0 == ret) {
-                printf("select-write timeout %d\n", tcp_fd);
-                break;
-            } else {
-                if (EINTR == errno) {
-                    printf("EINTR be caught\n");
-                    continue;
-                }
-
-                printf("select-write fail, ret = select() = %d\n", ret);
-                net_err = 1;
-                break;
-            }
-        }
-
-        if (ret > 0) {
-            ret = send(tcp_fd, buf + len_sent, len - len_sent, 0);
-            if (ret > 0) {
-                len_sent += ret;
-            } else if (0 == ret) {
-                printf("No data be sent\n");
-            } else {
-                if (EINTR == errno) {
-                    printf("EINTR be caught\n");
-                    continue;
-                }
-
-                printf("send fail, ret = send() = %d\n", ret);
-                net_err = 1;
-                break;
-            }
-        }
-    } while (!net_err && (len_sent < len) && (_linux_time_left(t_end, _linux_get_time_ms()) > 0));
-
-    if (net_err) {
-        return -1;
-    } else {
-        return len_sent;
-    }
+	if(HAL_AT_Uart_Send(&at_uart, buf, len, timeout_ms) == 0){
+		return len;
+	}else{
+		printf("tcp write error.\n");
+		return -1;
+	}
 }
 
 
@@ -685,7 +795,6 @@ int32_t HAL_TCP_Write(uintptr_t fd, const char *buf, uint32_t len, uint32_t time
  * @see None.
  * @note None.
  */
-
 uint64_t HAL_UptimeMs(void)
 {
     uint64_t            time_ms;
@@ -697,11 +806,8 @@ uint64_t HAL_UptimeMs(void)
     return time_ms;
 }
 
-
 int HAL_Vsnprintf(char *str, const int len, const char *format, va_list ap)
 {
     return vsnprintf(str, len, format, ap);
 }
-
-
 
